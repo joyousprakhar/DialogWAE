@@ -333,22 +333,25 @@ class DailyDialCorpus(object):
         :param path: the folder that contains the SWDA dialog corpus
         """
         train_data = open(path+'train.utts.txt', "r").readlines()
+        train_data1 = open(path+'train.act.txt', "r").readlines()
         valid_data = open(path+'valid.utts.txt', "r").readlines()
+        valid_data1 = open(path+'valid.act.txt', "r").readlines()
         test_data = open(path+'test.utts.txt', "r").readlines()
+        test_data1 = open(path+'test.act.txt', "r").readlines()
         
         self.emb_dim = wordvec_dim
         self.word2vec = None
         self.sil_utt = ["<s>", "<sil>", "</s>"]
         
-        self.train_corpus = self.process(train_data)
-        self.valid_corpus = self.process(valid_data)
-        self.test_corpus = self.process(test_data)
+        self.train_corpus = self.process(train_data, train_data1)
+        self.valid_corpus = self.process(valid_data, valid_data1)
+        self.test_corpus = self.process(test_data, test_data1)
         
         self.build_vocab(vocab_size)
         self.load_word2vec(wordvec_path)
         print("Done loading corpus")
 
-    def process(self, data):
+    def process(self, data, data1):
         """new_dialog: [(a, 1/0), (a,1/0)], new_utt: [[a,b,c)"""
         """ 1 is own utt and 0 is other's utt"""
         new_dialog = []
@@ -368,9 +371,22 @@ class DailyDialCorpus(object):
                 dialog = dialog + [(utt, int(floor%2==0))]
             new_utts.extend([bod_utt] + [utt for utt in lower_utts])
             new_dialog.append(dialog)
+        j = 0
+        new_dialog1 = []
+        for l in data1:
+            dialog = [(bod_utt, 0, None)]
+            acts = l.split(" ")
+            i=1
+            for act in acts:
+                if act =='\n':
+                    break
+                dialog = dialog + [(new_dialog[j][i][0],new_dialog[j][i][1],act)]
+                i+=1
+            j+=1
+            new_dialog1.append(dialog)
 
         print("Max utt len %d, mean utt len %.2f" % (np.max(all_lenes), float(np.mean(all_lenes))))
-        return new_dialog, new_utts
+        return new_dialog1, new_utts
 
     def build_vocab(self, vocab_size):
         all_words = []
@@ -394,6 +410,15 @@ class DailyDialCorpus(object):
         self.eos_id = self.ivocab["</s>"]
         print("<d> index %d" % self.ivocab["<d>"])
         print("<sil> index %d" % self.ivocab.get("<sil>", -1))
+
+        # get dialog act labels
+        all_dialog_acts = []
+        for dialog in self.train_corpus[0]:
+            all_dialog_acts.extend([feat[self.dialog_act_id] for caller, utt, feat in dialog if feat is not None])
+        self.dialog_act_vocab = [t for t, cnt in Counter(all_dialog_acts).most_common()]
+        self.rev_dialog_act_vocab = {t: idx for idx, t in enumerate(self.dialog_act_vocab)}
+        print(self.dialog_act_vocab)
+        print("%d dialog acts in train data" % len(self.dialog_act_vocab))
 
 
     def load_word2vec(self, word_vec_path):
@@ -436,8 +461,13 @@ class DailyDialCorpus(object):
             for dialog in data:
                 temp = []
                 # convert utterance and feature into numeric numbers
-                for utt, floor in dialog:
-                    temp.append(([self.ivocab.get(t, self.unk_id) for t in utt], floor))
+                for utt, floor, feat in dialog:
+                    if feat is not None:
+                        id_feat = list(feat)
+                        id_feat[self.dialog_act_id] = self.rev_dialog_act_vocab[feat[self.dialog_act_id]]
+                    else:
+                        id_feat = None
+                    temp.append(([self.ivocab.get(t, self.unk_id) for t in utt], floor, id_feat))
                 results.append(temp)
             return results
         id_train = _to_id_corpus(self.train_corpus[0])
@@ -558,17 +588,18 @@ class DailyDialDataLoader(object):
                 cut_row = row[s_id:e_id]
                 in_row = cut_row[0:-1]
                 out_row = cut_row[-1]
-                out_utt, out_floor = out_row
+                out_utt, out_floor, out_feat = out_row
                 
-                context_utts.append([self.pad_to(utt) for utt, floor in in_row])
-                utt_lens.append([min(len(utt),self.max_utt_size) for utt, floor in in_row])
+                context_utts.append([self.pad_to(utt) for utt, floor, feat in in_row])
+                utt_lens.append([min(len(utt),self.max_utt_size) for utt, floor, feat in in_row])
                 context_lens.append(len(cut_row) - 1)
-                floors.append([int(floor==out_floor) for utt, floor in in_row])
+                floors.append([int(floor==out_floor) for utt, floor, feat in in_row])
 
                 out_utt = self.pad_to(out_utt, do_pad=False)
                 out_utts.append(out_utt)
                 out_lens.append(len(out_utt))
                 out_floors.append(out_floor)
+                out_das.append(out_feat[0])
             else:
                 print(row)
                 raise ValueError("S_ID %d larger than row" % s_id)
@@ -580,6 +611,7 @@ class DailyDialDataLoader(object):
         vec_floors = np.zeros((self.batch_size, np.max(vec_context_lens)), dtype=np.int64)
         vec_outs = np.zeros((self.batch_size, np.max(out_lens)), dtype=np.int64)
         vec_out_lens = np.array(out_lens, dtype=np.int64)
+        vec_out_das = np.array(out_das, dtype=np.int64)
 
         for b_id in range(self.batch_size):
             vec_outs[b_id, 0:vec_out_lens[b_id]] = out_utts[b_id]
@@ -588,7 +620,7 @@ class DailyDialDataLoader(object):
             vec_utt_lens[b_id, 0:vec_context_lens[b_id]] = utt_lens[b_id]
 
         return vec_context, vec_context_lens, vec_utt_lens, vec_floors, None, \
-               None, None, vec_outs, vec_out_lens, None
+               None, None, vec_outs, vec_out_lens, vec_out_das
         
         
         

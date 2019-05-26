@@ -1,0 +1,1 @@
+{"data_path": "./data/", "dataset": "SWDA", "model": "DialogWAE_GMP", "expname": "basic", "visual": false, "reload_from": -1, "gpu_id": 0, "sample": false, "log_every": 100, "valid_every": 400, "eval_every": 2, "seed": 1111}

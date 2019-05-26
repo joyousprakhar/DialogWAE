@@ -88,6 +88,13 @@ class DialogWAE(nn.Module):
         self.decoder = Decoder(self.embedder, config['emb_size'], config['n_hidden']+config['z_size'], 
                                vocab_size, n_layers=1) 
         
+        self.dialog_act_decoder = nn.Sequential(
+            nn.Linear(config['n_hidden']+config['z_size'], config['n_hidden']*2),
+            nn.Tanh(),
+            nn.Dropout(0.5),
+            nn.Linear(config['n_hidden']*2, 4)
+        )
+
         self.discriminator = nn.Sequential(  
             nn.Linear(config['n_hidden']+config['z_size'], config['n_hidden']*2),
             nn.BatchNorm1d(config['n_hidden']*2, eps=1e-05, momentum=0.1),
@@ -100,7 +107,8 @@ class DialogWAE(nn.Module):
         self.discriminator.apply(self.init_weights)
         
            
-        self.optimizer_AE = optim.SGD(list(self.context_encoder.parameters())
+        self.optimizer_AE = optim.SGD(list(self.dialog_act_decoder.parameters())
+                                      +list(self.context_encoder.parameters())
                                       +list(self.post_net.parameters())
                                       +list(self.post_generator.parameters())
                                       +list(self.decoder.parameters()),lr=config['lr_ae'])
@@ -113,6 +121,7 @@ class DialogWAE(nn.Module):
         self.lr_scheduler_AE = optim.lr_scheduler.StepLR(self.optimizer_AE, step_size = 10, gamma=0.6)
         
         self.criterion_ce = nn.CrossEntropyLoss()
+        self.criterion_ce1 = nn.CrossEntropyLoss()
         
     def init_weights(self, m):
         if isinstance(m, nn.Linear):        
@@ -129,12 +138,18 @@ class DialogWAE(nn.Module):
         z = self.prior_generator(e)
         return z    
     
-    def train_AE(self, context, context_lens, utt_lens, floors, response, res_lens):
+    def train_AE(self, context, context_lens, utt_lens, floors, response, res_lens, dialog_act):
         self.context_encoder.train()
         self.decoder.train()
         c = self.context_encoder(context, context_lens, utt_lens, floors)
         x,_ = self.utt_encoder(response[:,1:], res_lens-1)      
         z = self.sample_code_post(x, c)
+        da_logits=self.dialog_act_decoder(torch.cat((z, c),1))
+        da_logits = da_logits - torch.max(da_logits, 1,True)[0]
+        loss2 = self.criterion_ce1(da_logits, dialog_act)
+        # da_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.da_logits, labels=self.output_das)
+        # self.avg_da_loss = tf.reduce_mean(da_loss)
+# 
         output = self.decoder(torch.cat((z, c),1), None, response[:,:-1], (res_lens-1))  
         flattened_output = output.view(-1, self.vocab_size) 
         
@@ -145,8 +160,11 @@ class DialogWAE(nn.Module):
         masked_output = flattened_output.masked_select(output_mask).view(-1, self.vocab_size)
         
         self.optimizer_AE.zero_grad()
-        loss = self.criterion_ce(masked_output/self.temp, masked_target)
+        loss1 = self.criterion_ce(masked_output/self.temp, masked_target)
+        loss = loss1 + loss2
         loss.backward()
+        print(loss1)
+        print(loss2)
 
         torch.nn.utils.clip_grad_norm_(list(self.context_encoder.parameters())+list(self.decoder.parameters()), self.clip)
         self.optimizer_AE.step()
@@ -165,12 +183,12 @@ class DialogWAE(nn.Module):
         x,_ = self.utt_encoder(response[:,1:], res_lens-1)
         z_post= self.sample_code_post(x.detach(), c.detach())
         errG_post = torch.mean(self.discriminator(torch.cat((z_post, c.detach()),1) ))
-        errG_post.backward(minus_one) 
+        errG_post.backward(minus_one.squeeze(0)) 
     
         # ----------------- prior samples ---------------------------
         prior_z = self.sample_code_prior(c.detach()) 
         errG_prior = torch.mean(self.discriminator(torch.cat((prior_z, c.detach()),1)))
-        errG_prior.backward(one) 
+        errG_prior.backward(one.squeeze(0)) 
     
         self.optimizer_G.step()
         
@@ -192,11 +210,11 @@ class DialogWAE(nn.Module):
         x,_ = self.utt_encoder(response[:,1:], res_lens-1)
         post_z = self.sample_code_post(x, c)
         errD_post = torch.mean(self.discriminator(torch.cat((post_z.detach(), c.detach()),1)))
-        errD_post.backward(one)
+        errD_post.backward(one.squeeze(0))
  
         prior_z = self.sample_code_prior(c) 
         errD_prior = torch.mean(self.discriminator(torch.cat((prior_z.detach(), c.detach()),1)))
-        errD_prior.backward(minus_one) 
+        errD_prior.backward(minus_one.squeeze(0)) 
     
         alpha = gData(torch.rand(batch_size, 1))
         alpha = alpha.expand(prior_z.size())
@@ -214,7 +232,7 @@ class DialogWAE(nn.Module):
         costD = -(errD_prior - errD_post) + gradient_penalty
         return [('train_loss_D', costD.item())]   
     
-    def valid(self, context, context_lens, utt_lens, floors, response, res_lens):
+    def valid(self, context, context_lens, utt_lens, floors, response, res_lens, dialog_act):
         self.context_encoder.eval()      
         self.discriminator.eval()
         self.decoder.eval()
@@ -226,7 +244,10 @@ class DialogWAE(nn.Module):
         errD_post = torch.mean(self.discriminator(torch.cat((post_z, c),1)))
         errD_prior = torch.mean(self.discriminator(torch.cat((prior_z, c),1)))
         costD = -(errD_prior - errD_post)
-        costG = -costD 
+        costG = -costD
+        da_logits=self.dialog_act_decoder(torch.cat((post_z, c),1))
+        da_logits = da_logits - torch.max(da_logits, 1,True)[0]
+        lossAE2 = self.criterion_ce1(da_logits, dialog_act) 
         
         dec_target = response[:,1:].contiguous().view(-1)
         mask = dec_target.gt(0) # [(batch_sz*seq_len)]
@@ -235,7 +256,8 @@ class DialogWAE(nn.Module):
         output = self.decoder(torch.cat((post_z, c),1), None, response[:,:-1], (res_lens-1)) 
         flattened_output = output.view(-1, self.vocab_size) 
         masked_output = flattened_output.masked_select(output_mask).view(-1, self.vocab_size)
-        lossAE = self.criterion_ce(masked_output/self.temp, masked_target)
+        lossAE1 = self.criterion_ce(masked_output/self.temp, masked_target)
+        lossAE = lossAE1 + lossAE2
         return [('valid_loss_AE', lossAE.item()),('valid_loss_G', costG.item()), ('valid_loss_D', costD.item())]
         
     def sample(self, context, context_lens, utt_lens, floors, repeat, SOS_tok, EOS_tok):    

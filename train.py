@@ -49,8 +49,8 @@ from tensorboardX import SummaryWriter # install tensorboardX (pip install tenso
 
 parser = argparse.ArgumentParser(description='DialogWAE Pytorch')
 # Path Arguments
-parser.add_argument('--data_path', type=str, default='./data/', help='location of the data corpus')
-parser.add_argument('--dataset', type=str, default='SWDA', help='name of dataset. SWDA or DailyDial')
+parser.add_argument('--data_path', type=str, default='/home/prakhar/Desktop/DialogWAE/data/', help='location of the data corpus')
+parser.add_argument('--dataset', type=str, default='DailyDial', help='name of dataset. SWDA or DailyDial')
 parser.add_argument('--model', type=str, default='DialogWAE_GMP', help='model name')
 parser.add_argument('--expname', type=str, default='basic', help='experiment name, for disinguishing different parameter settings')
 parser.add_argument('--visual', action='store_true', default=False, help='visualize training status in tensorboard')
@@ -115,7 +115,7 @@ config = getattr(configs, 'config_'+args.model)()
 ###############################################################################
 data_path=args.data_path+args.dataset+'/'
 #
-corpus = getattr(data, args.dataset+'Corpus')(data_path, wordvec_path=args.data_path+'glove.twitter.27B.200d.txt', wordvec_dim=config['emb_size'])
+corpus = getattr(data, args.dataset+'Corpus')(data_path, wordvec_path='/media/prakhar/Local Disk/glove/glove.twitter.27B.200d.txt', wordvec_dim=config['emb_size'])
 dials = corpus.get_dialogs()
 metas = corpus.get_metas()
 train_dial, valid_dial, test_dial = dials.get("train"), dials.get("valid"), dials.get("test")
@@ -168,12 +168,12 @@ for epoch in range(start_epoch, config['epochs']+1):
         batch = train_loader.next_batch()
         if batch is None: # end of epoch
             break
-        context, context_lens, utt_lens, floors,_,_,_,response,res_lens,_ = batch
+        context, context_lens, utt_lens, floors,_,_,_,response,res_lens, dialog_act = batch
         context, utt_lens = context[:,:,1:], utt_lens-1 # remove the sos token in the context and reduce the context length
-        context, context_lens, utt_lens, floors, response, res_lens\
-                = gVar(context), gVar(context_lens), gVar(utt_lens), gData(floors), gVar(response), gVar(res_lens)
+        context, context_lens, utt_lens, floors, response, res_lens, dialog_act\
+                = gVar(context), gVar(context_lens), gVar(utt_lens), gData(floors), gVar(response), gVar(res_lens), gVar(dialog_act)
             
-        loss_AE = model.train_AE(context, context_lens, utt_lens, floors, response, res_lens)
+        loss_AE = model.train_AE(context, context_lens, utt_lens, floors, response, res_lens, dialog_act)
         loss_records.extend(loss_AE)
 
         loss_G = model.train_G(context, context_lens, utt_lens, floors, response, res_lens)
@@ -188,10 +188,10 @@ for epoch in range(start_epoch, config['epochs']+1):
             batch = train_loader.next_batch()
             if batch is None: # end of epoch
                 break
-            context, context_lens, utt_lens, floors,_,_,_,response,res_lens,_ = batch
+            context, context_lens, utt_lens, floors,_,_,_,response,res_lens,dialog_act = batch
             context, utt_lens = context[:,:,1:], utt_lens-1 # remove the sos token in the context and reduce the context length
-            context, context_lens, utt_lens, floors, response, res_lens\
-                = gVar(context), gVar(context_lens), gVar(utt_lens), gData(floors), gVar(response), gVar(res_lens)                      
+            context, context_lens, utt_lens, floors, response, res_lens, dialog_act\
+                = gVar(context), gVar(context_lens), gVar(utt_lens), gData(floors), gVar(response), gVar(res_lens), gVar(dialog_act)                      
                 
                                
         if itr % args.log_every == 0:
@@ -216,11 +216,11 @@ for epoch in range(start_epoch, config['epochs']+1):
                 batch = valid_loader.next_batch()
                 if batch is None: # end of epoch
                     break
-                context, context_lens, utt_lens, floors,_,_,_,response,res_lens,_ = batch
+                context, context_lens, utt_lens, floors,_,_,_,response,res_lens, dialog_act = batch
                 context, utt_lens = context[:,:,1:], utt_lens-1 # remove the sos token in the context and reduce the context length
-                context, context_lens, utt_lens, floors, response, res_lens\
-                        = gVar(context), gVar(context_lens), gVar(utt_lens), gData(floors), gVar(response), gVar(res_lens)
-                valid_loss = model.valid(context, context_lens, utt_lens, floors, response, res_lens)    
+                context, context_lens, utt_lens, floors, response, res_lens, dialog_act\
+                        = gVar(context), gVar(context_lens), gVar(utt_lens), gData(floors), gVar(response), gVar(res_lens), gVar(dialog_act)
+                valid_loss = model.valid(context, context_lens, utt_lens, floors, response, res_lens, dialog_act)    
                 for loss_name, loss_value in valid_loss:
                     v=loss_records.get(loss_name, [])
                     v.append(loss_value)
